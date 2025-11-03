@@ -1,0 +1,449 @@
+trainer: dcase2020_trainer
+is_train: true
+is_test: true
+return_mode: best
+save_path: ./results/guided_mixup/seed=2024
+epoch: 1
+early_stopping: 20
+loss_key: guided_mixup_loss
+eval_key: guided_mixup_loss
+optimizer:
+  name: adam
+  args:
+    lr: 0.0001
+scheduler:
+  name: ReduceLROnPlateau
+  args:
+    mode: min
+    factor: 0.5
+    patience: 4
+    verbose: true
+train_loss_keys:
+  - guided_mixup_loss
+gpus:
+  - 4
+seed: 2024
+
+data_augmentation:
+  name: audio_mel_mixup
+  input_keys:
+    - input
+    - log_mel
+    - one_hot
+  output_keys:
+    - mixed_wav
+    - mixed_mel
+    - y_a
+    - y_b
+    - lambda
+  args:
+    alpha: 0.5
+    add_orig: false
+  input_keys_for_test:
+    - input
+    - log_mel
+    - one_hot
+    - one_hot
+    - one
+
+
+model:
+  node_list:
+    - node_name: tgramnet
+      node_type: tgramnet
+      args:
+        num_layer: 3
+
+    - node_name: tp_mfn_latent_extractor
+      node_type: tp_mfn_latent_extractor
+      args:
+        c_in: 2
+        c_out: 64
+        stride_1: [2, 1]
+        stride_2: [2, 1]
+        stride_3: [2, 2]
+        feature1: 512
+        feature2: 128
+        height: 8
+
+    - node_name: tp_mfn_projector
+      node_type: tp_mfn_projector
+      args:
+        n_features: 128
+        frames: 79
+
+    - node_name: mixup
+      node_type: mixup
+
+    - node_name: unsqueeze
+      node_type: unsqueeze
+      args:
+        dim: 1
+
+    - node_name: concatenate
+      node_type: concatenate
+      args:
+        dim: 1
+
+    - node_name: cosine_linear
+      node_type: cosine_linear
+      args:
+        in_features: 128
+        out_features: 41
+
+    - node_name: guided_mixup
+      node_type: guided_mixup
+      args:
+        s: 30
+        margin: 0.7
+
+    - node_name: cross_entropy_loss
+      node_type: nn.CrossEntropyLoss
+
+    - node_name: multiply
+      node_type: multiply
+
+    - node_name: sum
+      node_type: sum
+      args:
+        dim: 1
+
+    - node_name: subtract
+      node_type: subtract
+
+    - node_name: predicted_class
+      node_type: predicted_class
+      
+    - node_name: one_minus_input
+      node_type: one_minus_input
+
+    - node_name: softmax
+      node_type: nn.Softmax
+      args:
+        dim: 1
+
+    - node_name: target_indices
+      node_type: target_indices
+      args:
+        dim: 1
+
+    - node_name: normalize
+      node_type: normalize
+      args:
+        dim: 1
+
+  node_execution_list:
+    - node_name: mixup
+      input_keys:
+        - y_a
+        - y_b
+        - lambda
+      output_keys:
+        - mixed_one_hot                             # (B, 41)   
+
+    - node_name: tgramnet
+      input_keys: mixed_wav                         # (B, 1, N)
+      output_keys: tgram                            # (B, F, T)
+
+    - node_name: unsqueeze
+      input_keys: tgram
+      output_keys: tgram_3d                         # (B, 1, F, T)
+
+    - node_name: concatenate
+      input_keys: 
+        - tgram_3d                                  # (B, 1, F, T)     
+        - mixed_mel                                 # (B, 1, F, T)                                
+      output_keys: log_mel_tgram                    # (B, 2, F, T)
+
+    - node_name: tp_mfn_latent_extractor
+      input_keys: log_mel_tgram
+      output_keys: latent_features                  # (B, c=64, F=1, T=79)   
+
+    - node_name: tp_mfn_projector
+      input_keys: latent_features
+      output_keys: embedding                        # (B, 128)
+
+    - node_name: normalize
+      input_keys: embedding
+      output_keys: norm_embedding                   # (B, 128)
+
+    - node_name: cosine_linear
+      input_keys: embedding
+      output_keys: cos_theta                        # (B, 41)
+
+    - node_name: guided_mixup
+      input_keys:
+        - cos_theta
+        - mixed_one_hot
+      output_keys:
+        - logit                                       # (B, 41)
+
+    - node_name: cross_entropy_loss
+      input_keys: 
+        - logit
+        - mixed_one_hot
+      output_keys: guided_mixup_loss                  # (1)
+
+
+    - node_name: softmax
+      input_keys: logit
+      output_keys: class_prob                       # (B, 41)
+
+    - node_name: multiply
+      input_keys:
+        - class_prob
+        - y_a
+      output_keys: target_class_prob                # (B, 41) 
+
+    - node_name: sum
+      input_keys: target_class_prob
+      output_keys: target_prob                      # (B)
+
+    - node_name: one_minus_input
+      input_keys: target_prob
+      output_keys: anomaly_score                    # (B)
+
+
+
+
+
+
+train_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: train
+    train_val_split: 0.8
+
+validation_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: validation
+    train_val_split: 0.8
+
+test_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: test
+
+
+
+
+
+
+subset_metrics:
+  - subset_keys:
+      - machine_type_label
+      - dev_eval_label
+    metrics:
+      - name_key: Performance (Probability)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob"]
+          output_metric: mean
+
+
+      - name_key: Performance (KNN)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["knn"]
+          output_metric: mean
+
+
+      - name_key: Performance (GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["gmm"]
+          output_metric: mean
+
+
+      - name_key: Performance (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: mean
+
+
+  - subset_keys:
+      - machine_id_label
+    metrics:
+      - name_key: AUC (Probability)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob"]
+          output_metric: auc
+
+
+      - name_key: pAUC (Probability)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob"]
+          output_metric: pauc
+
+
+      - name_key: AUC (KNN)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["knn"]
+          output_metric: auc
+
+
+      - name_key: pAUC (KNN)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["knn"]
+          output_metric: pauc
+
+
+      - name_key: AUC (GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["gmm"]
+          output_metric: auc
+
+
+      - name_key: pAUC (GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["gmm"]
+          output_metric: pauc
+
+
+      - name_key: AUC (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: auc
+
+
+      - name_key: pAUC (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: pauc
+

@@ -1,0 +1,516 @@
+trainer: dcase2020_ltsp_trainer
+deterministic: false
+is_train: true
+is_test: true
+load_path: ./results/guided_mixup/seed=2024/ckpts/checkpoint_best.pth
+return_mode: best
+save_path: ./results/guided_mixup_ltsp/seed=2024/valve
+epoch: 2
+early_stopping: 20
+loss_key: mse_loss
+eval_key: mse_loss
+optimizer:
+  name: adam
+  args:
+    lr: 0.001
+scheduler:
+  name: ReduceLROnPlateau
+  args:
+    mode: min
+    factor: 0.5
+    patience: 5
+    verbose: true
+train_loss_keys:
+  - guided_mixup_loss
+  - mse_loss
+gpus:
+  - 7
+seed: 2024
+
+
+model:
+  node_list:
+    - node_name: tgramnet
+      node_type: tgramnet
+      args:
+        num_layer: 3
+        requires_grad: false
+
+    - node_name: tp_mfn_latent_extractor
+      node_type: tp_mfn_latent_extractor
+      args:
+        c_in: 2
+        c_out: 64
+        stride_1: [2, 1]
+        stride_2: [2, 1]
+        stride_3: [2, 2]
+        feature1: 512
+        feature2: 128
+        height: 8
+        requires_grad: false
+
+    - node_name: tp_mfn_projector
+      node_type: tp_mfn_projector
+      args:
+        n_features: 128
+        frames: 79
+        requires_grad: false
+
+    - node_name: cosine_linear
+      node_type: cosine_linear
+      args:
+        in_features: 128
+        out_features: 41
+        requires_grad: false
+
+    - node_name: ltsp
+      node_type: ltsp
+      args:
+        n_channel: 128
+        frames: 79
+        n_blocks: 2
+        n_mul: 3
+        kernel_size: 3
+        n_groups: 1
+
+    - node_name: guided_mixup
+      node_type: guided_mixup
+      args:
+        s: 30
+        margin: 0.7
+
+    - node_name: mixup
+      node_type: mixup
+
+    - node_name: unsqueeze
+      node_type: unsqueeze
+      args:
+        dim: 1
+
+    - node_name: concatenate
+      node_type: concatenate
+      args:
+        dim: 1
+
+    - node_name: normalize
+      node_type: normalize
+      args:
+        dim: 1
+
+    - node_name: cross_entropy_loss
+      node_type: nn.CrossEntropyLoss
+   
+    - node_name: one_minus_input
+      node_type: one_minus_input
+
+    - node_name: softmax
+      node_type: nn.Softmax
+      args:
+        dim: 1
+
+    - node_name: target_indices
+      node_type: target_indices
+      args:
+        dim: 1
+
+    - node_name: squeeze
+      node_type: squeeze
+      args:
+        dim: 2
+
+    - node_name: wavenet_mse_loss
+      node_type: wavenet_mse_loss
+
+    - node_name: wavenet_mse
+      node_type: wavenet_mse
+
+    - node_name: squeeze_dim1
+      node_type: squeeze
+      args:
+        dim: 1
+
+    - node_name: mean
+      node_type: mean
+      args:
+        dim: 2
+
+  node_execution_list:
+    - node_name: tgramnet
+      input_keys: input                             # (B, 1, N)
+      output_keys: tgram                            # (B, F, T)
+
+    - node_name: unsqueeze
+      input_keys: tgram
+      output_keys: tgram_3d                         # (B, 1, F, T)
+
+    - node_name: concatenate
+      input_keys: 
+        - tgram_3d                                  # (B, 1, F, T)     
+        - log_mel                                   # (B, 1, F, T)                                
+      output_keys: log_mel_tgram                    # (B, 2, F, T)
+
+    - node_name: tp_mfn_latent_extractor
+      input_keys: log_mel_tgram
+      output_keys: latent_features                  # (B, c=64, F=1, T=79)   
+
+    - node_name: tp_mfn_projector
+      input_keys: latent_features
+      output_keys: embedding                        # (B, 128)
+
+    - node_name: cosine_linear
+      input_keys: embedding
+      output_keys: cos_theta                        # (B, 41)
+
+    - node_name: guided_mixup
+      input_keys:
+        - cos_theta
+        - one_hot
+      output_keys:
+        - logit                                       # (B, 41)
+
+    - node_name: cross_entropy_loss
+      input_keys: 
+        - logit
+        - one_hot
+      output_keys: guided_mixup_loss                  # (1)
+
+
+    - node_name: normalize
+      input_keys: embedding
+      output_keys: norm_embedding                         # (B, 128)
+
+    - node_name: squeeze_dim1
+      input_keys: log_mel
+      output_keys: log_mel_squeezed                    # (B, F, T)
+
+    - node_name: squeeze
+      input_keys: latent_features
+      output_keys: gt_latent_features              # (B, C, T=79)
+
+    - node_name: ltsp
+      input_keys: gt_latent_features
+      output_keys: pred_latent_features             # (B, C, T'=64)
+
+    - node_name: wavenet_mse_loss
+      input_keys:
+        - pred_latent_features
+        - gt_latent_features
+      output_keys: mse_loss                         # (1)
+
+    - node_name: wavenet_mse
+      input_keys:
+        - pred_latent_features
+        - gt_latent_features
+      output_keys: latent_mse                         # (B)
+
+
+    # Anomaly score calculation
+    - node_name: softmax
+      input_keys: logit
+      output_keys: class_prob                       # (B, 41)
+
+    - node_name: target_indices
+      input_keys:
+        - class_prob
+        - machine_id_label
+      output_keys: target_prob                      # (B)
+
+    - node_name: one_minus_input
+      input_keys: target_prob
+      output_keys: anomaly_score                    # (B)
+
+  parameters:
+    - cosine_linear.weight
+
+
+
+train_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: train
+    train_val_split: 0.8
+    machine_list:
+      # - ToyCar
+      # - ToyConveyor
+      # - fan
+      # - pump
+      # - slider
+      - valve
+
+validation_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: validation
+    train_val_split: 0.8
+    machine_list:
+      # - ToyCar
+      # - ToyConveyor
+      # - fan
+      # - pump
+      # - slider
+      - valve
+    
+test_dataset:
+  dataset_name: new_dcase2020_dataset
+  batch_size: 32
+  num_workers: 16
+  args:
+    dataset_mode: test
+    machine_list:
+      # - ToyCar
+      # - ToyConveyor
+      # - fan
+      # - pump
+      # - slider
+      - valve 
+
+
+
+
+new_subset_metrics:
+  - subset_keys:
+      - dev_eval_label
+    metrics:
+      - name_key: Performance (Probability)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob"]
+          output_metric: mean
+
+
+      - name_key: Performance (Probability, KNN)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn"]
+          output_metric: mean
+
+
+      - name_key: Performance (Probability, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "gmm"]
+          output_metric: mean
+
+
+      - name_key: Performance (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: mean
+
+
+      - name_key: Performance (Probability, KNN, GMM, LTSP_error)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm", "ltsp_error"]
+          output_metric: mean
+
+
+
+
+  - subset_keys:
+      - machine_id_label
+    metrics:
+      - name_key: AUC (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: auc
+
+
+      - name_key: pAUC (Probability, KNN, GMM)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm"]
+          output_metric: pauc
+
+
+      - name_key: AUC (Probability, KNN, GMM, LTSP_error)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm", "ltsp_error"]
+          output_metric: auc
+
+
+      - name_key: pAUC (Probability, KNN, GMM, LTSP_error)
+        tensorboard_type: scalar
+        metric_type: new_average_performance_ltsp
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+          - machine_id_label
+        args:
+          scores: ["prob", "knn", "gmm", "ltsp_error"]
+          output_metric: pauc
+
+
+      - name_key: Scatter Plot (Probability, KNN, GMM vs. LTSP_error)
+        tensorboard_type: figure
+        figure_type: new_two_score_scatter_plot
+        dataset_mode:
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - train_test
+          - anomaly_label
+        args:
+          class_scores: ["prob", "knn", "gmm"]
+          pred_scores: ["ltsp_error"]
+          xlim: [0, 3]
+          ylim: [0, 3]
+          xlabel: "$s_{cls} / 3$"
+          ylabel: "$s_{pred}$"
+
+
+      - name_key: Score Histogram (Probability, KNN, GMM)
+        tensorboard_type: figure
+        figure_type: new_dcase2020_all_score_histogram
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - anomaly_label
+          - train_test
+        args:
+          scores: ["prob", "knn", "gmm"]
+          bins: 50
+          xlim: [0, 3]
+          ylim: [0, 80]
+          xlabel: "$s_{cls} / 3$"
+
+
+      - name_key: Score Histogram (LTSP_error)
+        tensorboard_type: figure
+        figure_type: new_dcase2020_all_score_histogram
+        dataset_mode: 
+          - train
+          - test
+        data_keys:
+          - anomaly_score
+          - norm_embedding
+          - gt_latent_features
+          - pred_latent_features
+          - anomaly_label
+          - train_test
+        args:
+          scores: ["ltsp_error"]
+          bins: 50
+          xlim: [0, 3]
+          ylim: [0, 80]
+          xlabel: '$\tilde{s}_{\mathrm{pred}}$'
+
