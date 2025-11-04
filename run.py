@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         "-c",
         "--config",
         type=str,
-        default="./configs/baseline.yaml",
+        default="./configs/tp_mfn_gm.yaml",
         help="Path to the config file.",
     )
     parser.add_argument(
