@@ -3,7 +3,7 @@ is_train: true
 is_test: true
 return_mode: best
 save_path: ./results/guided_mixup/seed=2024
-epoch: 1
+epoch: 300
 early_stopping: 20
 loss_key: guided_mixup_loss
 eval_key: guided_mixup_loss

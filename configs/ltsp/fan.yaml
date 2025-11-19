@@ -5,7 +5,7 @@ is_test: true
 load_path: ./results/guided_mixup/seed=2024/ckpts/checkpoint_best.pth
 return_mode: best
 save_path: ./results/guided_mixup_ltsp/seed=2024/fan
-epoch: 2
+epoch: 100
 early_stopping: 20
 loss_key: mse_loss
 eval_key: mse_loss
